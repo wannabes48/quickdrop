@@ -21,6 +21,35 @@ from django.core.mail import send_mail
 import googlemaps
 from datetime import timedelta
 from decimal import Decimal
+from django.middleware.csrf import get_token
+
+def get_csrf(request):
+    """Endpoint for React frontend to fetch a CSRF token"""
+    return JsonResponse({'csrfToken': get_token(request)})
+
+def api_current_user(request):
+    """Endpoint for React frontend to fetch the authenticated user session"""
+    if request.user.is_authenticated:
+        try:
+            profile = request.user.userprofile
+            return JsonResponse({
+                'isAuthenticated': True,
+                'user': {
+                    'id': request.user.id,
+                    'username': request.user.username,
+                    'email': request.user.email,
+                    'first_name': request.user.first_name,
+                    'last_name': request.user.last_name,
+                    'role': profile.user_type, # 'customer' or 'worker'
+                    'vehicle_type': dict(UserProfile.VEHICLE_TYPE_CHOICES).get(profile.vehicle_type, '') if profile.vehicle_type else None,
+                    'phone': profile.phone_number,
+                    'address': profile.address
+                }
+            })
+        except Exception as e:
+            return JsonResponse({'isAuthenticated': False, 'error': str(e)}, status=500)
+    else:
+        return JsonResponse({'isAuthenticated': False}, status=401)
 
 @csrf_protect
 def register(request):

@@ -10,6 +10,8 @@ urlpatterns = [
     path('register/', views.register, name='register'),
     path('login/', views.user_login, name='login'),
     path('logout/', views.user_logout, name='logout'),
+    path('api/csrf/', views.get_csrf, name='api_csrf'),
+    path('api/me/', views.api_current_user, name='api_me'),
 
     # Protected Routes
     path('dashboard/', views.dashboard, name='dashboard'),

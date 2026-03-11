@@ -20,31 +20,45 @@ class DeliveryViewSet(viewsets.ModelViewSet):
     def update_status(self, request, pk=None):
         delivery = self.get_object()
         new_status = request.data.get('status')
-        notes = request.data.get('notes')
+        notes = request.data.get('notes', '')
 
-        if not new_status:
+        if not new_status or new_status not in dict(Delivery.STATUS_CHOICES):
             return Response(
-                {'error': 'Status is required'},
+                {'error': 'Invalid status'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        success = delivery.update_status(new_status, notes)
-        if success:
-            if new_status == 'DELIVERED':
-                delivery.actual_delivery_time = timezone.now()
-                delivery.save()
+        delivery.status = new_status
+        if notes:
+            delivery.delivery_notes = notes
+
+        if new_status == 'DELIVERED':
+            delivery.delivery_time = timezone.now()
+            delivery.save()
+            from .tasks import calculate_and_save_earnings
+            calculate_and_save_earnings.delay(delivery.id)
             return Response(self.get_serializer(delivery).data)
-        return Response(
-            {'error': 'Invalid status'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+            
+        delivery.save()
+        return Response(self.get_serializer(delivery).data)
 
     @action(detail=True, methods=['get'])
     def tracking_history(self, request, pk=None):
         delivery = self.get_object()
+        # Mocking history since no tracking model exists yet
         return Response({
-            'tracking_history': delivery.get_tracking_history()
+            'tracking_history': [{'status': delivery.status, 'timestamp': delivery.updated_at}]
         })
+
+    @action(detail=True, methods=['get'])
+    def payment_status(self, request, pk=None):
+        """Lightweight endpoint polled by the PaymentOverlay every 3 seconds."""
+        delivery = self.get_object()
+        return Response({
+            'payment_status': delivery.payment_status,
+            'order_id': delivery.order_id,
+        })
+
 
     @action(detail=False, methods=['get'])
     def stats(self, request):
@@ -131,14 +145,48 @@ class JobViewSet(viewsets.ModelViewSet):
 
         if new_status == 'DELIVERED':
             job.status = new_status
-            job.actual_delivery_time = timezone.now()
+            job.delivery_time = timezone.now()
             job.save()
+            from .tasks import calculate_and_save_earnings
+            calculate_and_save_earnings.delay(job.id)
             return Response({
                 'success': True,
                 'message': 'Job marked as delivered'
             })
 
-        return Response(
-            {'error': 'Invalid status'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        job.status = new_status
+        job.save()
+        return Response({
+            'success': True,
+            'message': 'Job status updated'
+        })
+
+class MpesaWebhookView(viewsets.ViewSet):
+    permission_classes = [permissions.AllowAny]
+
+    @action(detail=False, methods=['post'])
+    def callback(self, request):
+        data = request.data
+        try:
+            body = data.get('Body', {})
+            stk_callback = body.get('stkCallback', {})
+            result_code = stk_callback.get('ResultCode')
+            result_desc = stk_callback.get('ResultDesc')
+            
+            # Add error handling for user cancellations or insufficient balances
+            if result_code != 0:
+                print(f"M-Pesa Payment Error: {result_desc} (Code: {result_code})")
+                # e.g., result_code 1032 is user cancelled, 1037 timeout, 1 insufficient balance
+                if result_code == 1032:
+                    return Response({"ResultCode": 0, "ResultDesc": "Acknowledged User Cancelled"}, status=status.HTTP_200_OK)
+                elif result_code == 1:
+                    return Response({"ResultCode": 0, "ResultDesc": "Acknowledged Insufficient Balance"}, status=status.HTTP_200_OK)
+                return Response({"ResultCode": 0, "ResultDesc": "Acknowledged error"}, status=status.HTTP_200_OK)
+                
+            # Success logic
+            callback_metadata = stk_callback.get('CallbackMetadata', {}).get('Item', [])
+            receipt_number = next((item.get('Value') for item in callback_metadata if item.get('Name') == 'MpesaReceiptNumber'), None)
+            
+            return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

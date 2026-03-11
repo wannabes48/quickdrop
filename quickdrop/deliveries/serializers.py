@@ -1,53 +1,104 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from .models import Delivery
 
 User = get_user_model()
 
+# Ordered list of status steps for the delivery stepper
+TRACKING_STEPS = [
+    ('PENDING',    'Order Placed'),
+    ('ASSIGNED',   'Courier Assigned'),
+    ('PICKED_UP',  'Picked Up'),
+    ('IN_TRANSIT', 'In Transit'),
+    ('DELIVERED',  'Delivered'),
+]
+
+class DeliveryTrackingStepSerializer(serializers.Serializer):
+    key = serializers.CharField()
+    label = serializers.CharField()
+    is_complete = serializers.BooleanField()
+    is_current = serializers.BooleanField()
+
+
 class DeliverySerializer(serializers.ModelSerializer):
-    tracking_history = serializers.ListField(read_only=True)
     worker_name = serializers.SerializerMethodField()
     customer_name = serializers.SerializerMethodField()
+    tracking_steps = serializers.SerializerMethodField()
+    assigned_driver_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Delivery
         fields = [
-            'id', 'order_id', 'tracking_id', 'status', 'created_at',
-            'pickup_location', 'pickup_location_lat', 'pickup_location_lng',
-            'delivery_location', 'delivery_location_lat', 'delivery_location_lng',
-            'current_location_lat', 'current_location_lng',
-            'estimated_delivery_time', 'actual_delivery_time',
-            'customer', 'worker', 'worker_name', 'customer_name',
-            'tracking_history'
+            'id', 'order_id', 'tracking_id',
+            'status', 'payment_status', 'payment_method', 'amount',
+            'created_at', 'updated_at', 'pickup_time', 'delivery_time',
+            'pickup_location', 'delivery_location',
+            'sender_name', 'sender_phone',
+            'recipient_name', 'recipient_phone',
+            'package_type', 'weight', 'delivery_notes',
+            'customer', 'assigned_driver',
+            'worker_name', 'customer_name', 'assigned_driver_name',
+            'tracking_steps',
         ]
-        read_only_fields = ['tracking_id', 'worker', 'actual_delivery_time', 'tracking_history']
+        read_only_fields = ['tracking_id', 'assigned_driver', 'delivery_time', 'tracking_steps']
 
     def get_worker_name(self, obj):
-        if obj.worker:
-            return f"{obj.worker.first_name} {obj.worker.last_name}"
+        if obj.assigned_driver:
+            profile = getattr(obj.assigned_driver, 'userprofile', None)
+            if profile:
+                return f"{profile.first_name} {profile.last_name}".strip()
+            return obj.assigned_driver.get_full_name() or obj.assigned_driver.username
         return None
+
+    # alias kept for backwards compatibility
+    def get_assigned_driver_name(self, obj):
+        return self.get_worker_name(obj)
 
     def get_customer_name(self, obj):
         if obj.customer:
-            return f"{obj.customer.first_name} {obj.customer.last_name}"
+            profile = getattr(obj.customer, 'userprofile', None)
+            if profile:
+                return f"{profile.first_name} {profile.last_name}".strip()
+            return obj.customer.get_full_name() or obj.customer.username
         return None
 
+    def get_tracking_steps(self, obj):
+        """Return a structured step list for the frontend stepper."""
+        current_index = next(
+            (i for i, (key, _) in enumerate(TRACKING_STEPS) if key == obj.status),
+            0
+        )
+        return [
+            {
+                'key': key,
+                'label': label,
+                'is_complete': i < current_index,
+                'is_current': i == current_index,
+            }
+            for i, (key, label) in enumerate(TRACKING_STEPS)
+        ]
+
+
 class JobSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for courier job listings."""
     customer_name = serializers.SerializerMethodField()
-    pickup_address = serializers.CharField(source='pickup_location', read_only=True)
-    delivery_address = serializers.CharField(source='delivery_location', read_only=True)
 
     class Meta:
         model = Delivery
         fields = [
-            'id', 'order_id', 'tracking_id', 'status',
-            'pickup_address', 'pickup_location_lat', 'pickup_location_lng',
-            'delivery_address', 'delivery_location_lat', 'delivery_location_lng',
-            'estimated_delivery_time', 'customer_name'
+            'id', 'order_id', 'tracking_id', 'status', 'payment_method', 'amount',
+            'pickup_location', 'delivery_location',
+            'sender_name', 'recipient_name', 'package_type', 'weight',
+            'customer_name',
         ]
-        read_only_fields = ['tracking_id', 'status', 'estimated_delivery_time']
+        read_only_fields = ['tracking_id', 'status']
 
     def get_customer_name(self, obj):
         if obj.customer:
-            return f"{obj.customer.first_name} {obj.customer.last_name}"
+            profile = getattr(obj.customer, 'userprofile', None)
+            if profile:
+                return f"{profile.first_name} {profile.last_name}".strip()
+            return obj.customer.get_full_name() or obj.customer.username
         return None
+
